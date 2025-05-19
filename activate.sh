@@ -22,7 +22,10 @@ source venv/bin/activate
 
 # Upgrade pip and install Python dependencies
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install accelerate --no-deps
+pip install transformers datasets pandas
+
+#pip install -r requirements.txt
 
 # Run preprocessing scripts
 echo "⚙️ Running stage1_preprocess.py..."
