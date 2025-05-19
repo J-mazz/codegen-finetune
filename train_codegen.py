@@ -25,6 +25,7 @@ print(f"Using device: {device}")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token  # FIX for padding error!
+print("PAD TOKEN:", tokenizer.pad_token, "ID:", tokenizer.pad_token_id)
 
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
 
