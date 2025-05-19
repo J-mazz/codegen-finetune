@@ -10,10 +10,8 @@ from hashlib import sha256
 PROCESSED_CSV_DIR = "./processed_csv"
 os.makedirs(PROCESSED_CSV_DIR, exist_ok=True)
 
-# Global sample cap (enforced if not specified per dataset)
 DEFAULT_MAX_SAMPLES = 5000
 
-# Dataset configuration
 DATASETS = [
     {"hf_name": "mbpp", "split": "train", "output": "mbpp.csv"},
     {"hf_name": "codeparrot/github-code", "split": "train", "output": "codeparrot.csv", "max_samples": 3000, "trust_remote_code": True},
@@ -24,7 +22,7 @@ DATASETS = [
 ]
 
 def clean_code(text):
-    text = text.strip()
+    text = text.strip() if isinstance(text, str) else ""
     return re.sub(r'[\r\t]+', ' ', text)
 
 def synthesize_prompt(example):
@@ -32,23 +30,35 @@ def synthesize_prompt(example):
     return f"# Task: {doc.strip()}"
 
 def extract_completion(example):
-    return clean_code(example.get("code") or example.get("solution") or example.get("completion") or example.get("content") or "")
+    return clean_code(
+        example.get("code")
+        or example.get("solution")
+        or example.get("completion")
+        or example.get("content")
+        or ""
+    )
 
 for config in DATASETS:
     try:
-        print(f"Processing {config['hf_name']}...")
-        ds = load_dataset(
-            config["hf_name"],
-            split=config["split"],
-            use_auth_token=config.get("use_auth", False),
-            trust_remote_code=config.get("trust_remote_code", False)
-        )
+        print(f"\n➡️  Processing {config['hf_name']}...")
+        # Dynamically build load_dataset args to avoid unexpected keyword errors
+        ds_args = {
+            "path": config["hf_name"],
+            "split": config["split"]
+        }
+        if config.get("trust_remote_code", False):
+            ds_args["trust_remote_code"] = True
+        if config.get("use_auth", False):
+            ds_args["token"] = True  # Use new HF Datasets 'token' argument
+
+        ds = load_dataset(**ds_args)
     except Exception as e:
         print(f"❌ Error loading {config['hf_name']}: {e}")
         continue
 
     rows = []
     limit = config.get("max_samples", DEFAULT_MAX_SAMPLES)
+    n_total = 0
 
     for i, ex in enumerate(ds):
         if i >= limit:
@@ -63,12 +73,16 @@ for config in DATASETS:
             "dataset": config["hf_name"],
             "language": ex.get("language") or "python"
         })
-        if i % 1000 == 0:
-            print(f"  Processed {i} examples...")
+        n_total += 1
+        if n_total % 1000 == 0:
+            print(f"  Processed {n_total} valid examples...")
 
-    df = pd.DataFrame(rows)
-    out_path = os.path.join(PROCESSED_CSV_DIR, config["output"])
-    df.to_csv(out_path, index=False)
-    print(f"✅ Saved {len(rows)} examples to {out_path}\n")
+    if rows:
+        df = pd.DataFrame(rows)
+        out_path = os.path.join(PROCESSED_CSV_DIR, config["output"])
+        df.to_csv(out_path, index=False)
+        print(f"✅ Saved {len(rows)} examples to {out_path}\n")
+    else:
+        print(f"⚠️  No valid examples extracted for {config['hf_name']}.\n")
 
-print("🎉 All datasets processed successfully.")
+print("🎉 All datasets processed (even if some failed).")
