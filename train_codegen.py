@@ -1,52 +1,69 @@
-# train_codegen.py
+# train_codegen.py (updated for compatibility and modern Hugging Face usage)
 
 import os
-from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling, TextDataset
+import torch
+from datasets import load_dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Trainer,
+    TrainingArguments,
+    DataCollatorForLanguageModeling
+)
 
 # --- Configuration ---
-MODEL_NAME = "Salesforce/codegen-350M-mono"  # You can swap to 2B or 6B depending on compute
+MODEL_NAME = "Salesforce/codegen-350M-mono"
 DATA_PATH = "./final_dataset.txt"
 OUTPUT_DIR = "./codegen_finetuned"
 MAX_SEQ_LENGTH = 512
-BATCH_SIZE = 4
-EPOCHS = 3
+BATCH_SIZE = 1
+EPOCHS = 1
 
-# --- Load Tokenizer and Model ---
-print("Loading tokenizer and model...")
+# --- Load tokenizer and model ---
+print("🔄 Loading tokenizer and model...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 
-# --- Prepare Dataset ---
-def load_dataset(file_path):
-    return TextDataset(
-        tokenizer=tokenizer,
-        file_path=file_path,
-        block_size=MAX_SEQ_LENGTH
+# --- Load dataset with streaming ---
+def load_txt_dataset(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+    return {"text": lines}
+
+def tokenize_function(example):
+    return tokenizer(
+        example["text"],
+        truncation=True,
+        max_length=MAX_SEQ_LENGTH,
+        padding="max_length"
     )
 
-print("Loading dataset...")
-train_dataset = load_dataset(DATA_PATH)
+print("📄 Loading dataset from final_dataset.txt")
+raw_data = load_txt_dataset(DATA_PATH)
+from datasets import Dataset
+train_dataset = Dataset.from_dict(raw_data)
+train_dataset = train_dataset.map(tokenize_function, batched=True, remove_columns=["text"])
 
+# --- Data collator ---
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer,
     mlm=False
 )
 
-# --- Training Arguments ---
+# --- Training args ---
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
     per_device_train_batch_size=BATCH_SIZE,
     num_train_epochs=EPOCHS,
-    save_total_limit=2,
     save_strategy="epoch",
     logging_dir=os.path.join(OUTPUT_DIR, "logs"),
     logging_steps=50,
-    fp16=True if torch.cuda.is_available() else False,
+    fp16=torch.cuda.is_available(),
     evaluation_strategy="no"
 )
 
-# --- Trainer Setup ---
+# --- Trainer ---
 trainer = Trainer(
     model=model,
     args=training_args,
@@ -55,11 +72,12 @@ trainer = Trainer(
 )
 
 # --- Train ---
-print("Starting training...")
+print("🚀 Starting training...")
 trainer.train()
 
-# --- Save Final Model ---
-print(f"Saving model to {OUTPUT_DIR}...")
+# --- Save model ---
+print(f"💾 Saving model to {OUTPUT_DIR}...")
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
-print("Training complete.")
+
+print("✅ Training complete.")
