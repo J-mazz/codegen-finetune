@@ -17,7 +17,6 @@ DATASETS = [
     {"hf_name": "open-r1/verifiable-coding-problems-python", "split": "train", "output": "verifiable_problems.csv"},
     {"hf_name": "iamtarun/python_code_instructions_18k_alpaca", "split": "train", "output": "alpaca_18k.csv"},
     {"hf_name": "MatrixStudio/Codeforces-Python-Submissions", "split": "train", "output": "codeforces_submissions.csv"},
-    {"hf_name": "jtatman/python-code-dataset-500k", "split": "train", "output": "code_500k.csv", "max_samples": 25000, "use_auth": True}
 ]
 
 def clean_code(text):
