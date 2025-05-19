@@ -20,15 +20,6 @@ if [ ! -d "venv" ]; then
 fi
 source venv/bin/activate
 
-# Upgrade pip and install GPU-compatible PyTorch if GPU is available, otherwise fallback to CPU
-if command -v nvidia-smi &> /dev/null; then
-  echo "🟢 GPU detected - installing CUDA-enabled PyTorch"
-  pip install torch torchvision torchaudio
-else
-  echo "🔴 No GPU found - installing CPU-only PyTorch"
-  pip install torch==2.1.2+cpu -f https://download.pytorch.org/whl/torch_stable.html
-fi
-
 # Install remaining dependencies
 pip install transformers datasets pandas
 
