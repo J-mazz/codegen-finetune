@@ -14,7 +14,6 @@ DEFAULT_MAX_SAMPLES = 5000
 
 DATASETS = [
     {"hf_name": "mbpp", "split": "train", "output": "mbpp.csv"},
-    {"hf_name": "codeparrot/github-code", "split": "train", "output": "codeparrot.csv", "max_samples": 3000, "trust_remote_code": True},
     {"hf_name": "open-r1/verifiable-coding-problems-python", "split": "train", "output": "verifiable_problems.csv"},
     {"hf_name": "iamtarun/python_code_instructions_18k_alpaca", "split": "train", "output": "alpaca_18k.csv"},
     {"hf_name": "MatrixStudio/Codeforces-Python-Submissions", "split": "train", "output": "codeforces_submissions.csv"},
