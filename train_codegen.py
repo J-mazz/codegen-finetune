@@ -1,8 +1,8 @@
-# train_codegen.py (updated for compatibility and modern Hugging Face usage)
+# train_codegen.py
 
 import os
 import torch
-from datasets import load_dataset
+from datasets import Dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -11,7 +11,7 @@ from transformers import (
     DataCollatorForLanguageModeling
 )
 
-# --- Configuration ---
+# --- Config ---
 MODEL_NAME = "Salesforce/codegen-350M-mono"
 DATA_PATH = "./final_dataset.txt"
 OUTPUT_DIR = "./codegen_finetuned"
@@ -24,7 +24,7 @@ print("🔄 Loading tokenizer and model...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 
-# --- Load dataset with streaming ---
+# --- Load and process dataset ---
 def load_txt_dataset(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f.readlines() if line.strip()]
@@ -38,9 +38,11 @@ def tokenize_function(example):
         padding="max_length"
     )
 
-print("📄 Loading dataset from final_dataset.txt")
+print(f"📄 Loading dataset from {DATA_PATH}")
 raw_data = load_txt_dataset(DATA_PATH)
-from datasets import Dataset
+if not raw_data["text"]:
+    raise ValueError(f"No data found in {DATA_PATH}. Please check preprocessing output.")
+
 train_dataset = Dataset.from_dict(raw_data)
 train_dataset = train_dataset.map(tokenize_function, batched=True, remove_columns=["text"])
 
@@ -59,8 +61,7 @@ training_args = TrainingArguments(
     save_strategy="epoch",
     logging_dir=os.path.join(OUTPUT_DIR, "logs"),
     logging_steps=50,
-    fp16=torch.cuda.is_available(),
-    evaluation_strategy="no"
+    fp16=torch.cuda.is_available()
 )
 
 # --- Trainer ---
