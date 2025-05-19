@@ -20,15 +20,16 @@ if [ ! -d "venv" ]; then
 fi
 source venv/bin/activate
 
-# Upgrade pip and install Python dependencies
-pip install --upgrade pip
-pip install accelerate --no-deps
+# Upgrade pip and install GPU-compatible PyTorch if GPU is available, otherwise fallback to CPU
+if command -v nvidia-smi &> /dev/null; then
+  echo "🟢 GPU detected - installing CUDA-enabled PyTorch"
+  pip install torch torchvision torchaudio
+
+# Install remaining dependencies
 pip install transformers datasets pandas
 
-#pip install -r requirements.txt
-
 # Run preprocessing scripts
-echo "⚙️ Running stage1_preprocess.py..."
+echo "⚙️ Running optimized_stage1_preprocess.py..."
 python preprocess.py
 
 echo "⚙️ Running stage2_combine_clean.py..."
