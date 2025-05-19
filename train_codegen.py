@@ -1,3 +1,5 @@
+# train_codegen.py
+
 import os
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -21,6 +23,9 @@ print(f"Using device: {device}")
 
 # --- Load tokenizer and model ---
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token  # FIX for padding error!
+
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
 
 # --- Load and tokenize dataset ---
@@ -69,12 +74,12 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = 0
     train_acc = 0
     progress = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
-    
+
     for batch in progress:
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = input_ids.clone()
-        
+
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         loss = outputs.loss
@@ -112,7 +117,7 @@ for epoch in range(1, EPOCHS + 1):
             loss = outputs.loss
             logits = outputs.logits
 
-            # For UI: print sample softmax/probabilities for a random batch
+            # Show sample softmax/probabilities for a random batch
             if torch.rand(1).item() < 0.01:
                 probs = torch.softmax(logits[0], dim=-1)
                 print(f"\nSample softmax probabilities for batch: {probs[0, :10].cpu().detach().numpy()}")
@@ -126,9 +131,8 @@ for epoch in range(1, EPOCHS + 1):
     print(f"[Val]   Epoch {epoch}: Loss={avg_val_loss:.4f}, Accuracy={avg_val_acc:.4f}")
     print("-" * 40)
 
-    # Save checkpoint each epoch (optional)
+    # Save checkpoint each epoch
     model.save_pretrained(f"{OUTPUT_DIR}/epoch_{epoch}")
     tokenizer.save_pretrained(f"{OUTPUT_DIR}/epoch_{epoch}")
 
 print("✅ Training complete. Best model may be in final epoch folder.")
-# train_codegen.py
