@@ -6,7 +6,20 @@ from torch.utils.data import DataLoader, random_split
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW, get_linear_schedule_with_warmup
 from tqdm.auto import tqdm
+from torch.utils.data import Dataset as TorchDataset # Alias to avoid confusion
 
+class CustomTextDataset(TorchDataset):
+    def __init__(self, tokenized_samples):
+        self.samples = tokenized_samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+# Create instances of this custom dataset
+full_custom_dataset = CustomTextDataset(raw_tokenized_samples)
 # --- Config ---
 MODEL_NAME = "Salesforce/codegen-350M-mono"
 DATA_PATH = "./final_dataset.txt"
@@ -23,13 +36,50 @@ print(f"Using device: {device}")
 
 # --- Load tokenizer and model ---
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+# (In train_codegen.py)
+# ...
+# --- Load tokenizer and model ---
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token  # FIX for padding error!
-print("PAD TOKEN:", tokenizer.pad_token, "ID:", tokenizer.pad_token_id)
+    # Still important to define what token to use for padding,
+    # even if we manually apply it later.
+    tokenizer.pad_token = tokenizer.eos_token
+print(f"Using pad_token: '{tokenizer.pad_token}' with ID: {tokenizer.pad_token_id}")
 
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
 
+# --- Load and prepare dataset manually ---
+with open(DATA_PATH, "r", encoding="utf-8") as f:
+    lines = [line.strip() for line in f.readlines() if line.strip()]
+
+if not lines:
+    raise ValueError(f"No data found in {DATA_PATH}")
+
+# Tokenize each text individually, but don't pad yet, just truncate
+# We'll handle padding at the batch level.
+# This gives you raw token_ids for each example.
+# The output of tokenizer() without padding is a list of token IDs.
+raw_tokenized_samples = []
+for text_sample in tqdm(lines, desc="Tokenizing samples"):
+    tokenized_output = tokenizer(
+        text_sample,
+        truncation=True,
+        max_length=MAX_SEQ_LENGTH,
+        # IMPORTANT: No padding here, or padding=False
+        padding=False
+    )
+    raw_tokenized_samples.append({
+        "input_ids": tokenized_output["input_ids"],
+        "attention_mask": tokenized_output["attention_mask"] # Will also be unpadded
+    })
+
+# Now, raw_tokenized_samples is a list of dicts,
+# e.g., [{'input_ids': [10, 20, 30], 'attention_mask': [1,1,1]}, ...]
+# where each list of input_ids can be of a different length.
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
+
 # --- Load and tokenize dataset ---
+
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     lines = [line.strip() for line in f.readlines() if line.strip()]
 
@@ -38,15 +88,56 @@ if not lines:
 
 dataset = Dataset.from_dict({"text": lines})
 
-def tokenize_function(batch):
-    return tokenizer(
-        batch["text"],
-        truncation=True,
-        max_length=MAX_SEQ_LENGTH,
-        padding="max_length"
-    )
+def custom_collate_fn(batch_samples, pad_token_id, max_len=None):
+    """
+    Manually pads a batch of tokenized samples.
+    batch_samples: A list of dicts, e.g., [{'input_ids': [...], 'attention_mask': [...]}, ...]
+    pad_token_id: The ID to use for padding.
+    max_len: If None, pads to the longest sequence in the batch.
+             If set, pads all sequences to this max_len.
+    """
+    input_ids_list = [sample['input_ids'] for sample in batch_samples]
 
-tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+    if max_len is None:
+        # Pad to the longest sequence in the current batch
+        current_max_len = max(len(ids) for ids in input_ids_list)
+    else:
+        # Pad to the global MAX_SEQ_LENGTH (or other desired fixed length)
+        current_max_len = max_len
+
+    padded_input_ids = []
+    padded_attention_masks = []
+
+    for input_ids in input_ids_list:
+        num_padding_tokens = current_max_len - len(input_ids)
+        
+        padded_ids = input_ids + [pad_token_id] * num_padding_tokens
+        # Attention mask: 1 for real tokens, 0 for padding tokens
+        attention_mask = [1] * len(input_ids) + [0] * num_padding_tokens
+        
+        padded_input_ids.append(padded_ids)
+        padded_attention_masks.append(attention_mask)
+
+    return {
+        "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
+        "attention_mask": torch.tensor(padded_attention_masks, dtype=torch.long)
+    }
+
+# --- Train/val split (using your CustomTextDataset) ---
+val_size = int(VAL_SPLIT * len(full_custom_dataset))
+train_size = len(full_custom_dataset) - val_size
+train_custom_dataset, val_custom_dataset = random_split(full_custom_dataset, [train_size, val_size])
+
+# Use the custom_collate_fn in your DataLoader
+# You need to pass the pad_token_id to it. functools.partial can help.
+from functools import partial
+
+collate_fn_with_padding = partial(custom_collate_fn,
+                                  pad_token_id=tokenizer.pad_token_id,
+                                  max_len=MAX_SEQ_LENGTH) # Or None to pad per-batch
+
+train_loader = DataLoader(train_custom_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn_with_padding)
+val_loader = DataLoader(val_custom_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn_with_padding)
 
 # --- Train/val split ---
 val_size = int(VAL_SPLIT * len(tokenized_dataset))
