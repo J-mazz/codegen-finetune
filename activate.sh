@@ -20,8 +20,9 @@ if [ ! -d "venv" ]; then
 fi
 source venv/bin/activate
 
+pip install -r REQUIREMENTS.TXT
 # Install remaining dependencies
-pip install transformers datasets pandas
+pip install transformers datasets pandas 
 
 # Run preprocessing scripts
 echo "⚙️ Running optimized_stage1_preprocess.py..."
