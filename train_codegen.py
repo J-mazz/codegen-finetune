@@ -2,7 +2,6 @@
 import os
 import torch
 from torch.utils.data import DataLoader, random_split
-# Remove AdamW from this line
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_linear_schedule_with_warmup
 from torch.optim import AdamW # Add this line
 from tqdm.auto import tqdm
