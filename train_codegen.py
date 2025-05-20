@@ -1,13 +1,12 @@
 # train_codegen.py
-
 import os
 import torch
-from torch.utils.data import DataLoader, random_split # Removed 'Dataset' from here as we use TorchDataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW, get_linear_schedule_with_warmup
+from torch.utils.data import DataLoader, random_split
+# Remove AdamW from this line
+from transformers import AutoTokenizer, AutoModelForCausalLM, get_linear_schedule_with_warmup
+from torch.optim import AdamW # Add this line
 from tqdm.auto import tqdm
-from torch.utils.data import Dataset as TorchDataset # Alias for clarity
-from functools import partial # For the collate_fn
-
+# ... rest of your imports
 # --- Config ---
 MODEL_NAME = "Salesforce/codegen-350M-mono"
 DATA_PATH = "./final_dataset.txt" # From your uploaded script
