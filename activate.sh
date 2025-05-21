@@ -20,19 +20,19 @@ if [ ! -d "venv" ]; then
 fi
 source venv/bin/activate
 
-pip install -r REQUIREMENTS.TXT
+pip install -r REQUIREMENTS.txt
 # Install remaining dependencies
-pip install transformers datasets pandas 
+pip install transformers datasets pandas numpy torch torch_xla tqdm
 
 # Run preprocessing scripts
 echo "⚙️ Running optimized_stage1_preprocess.py..."
 python preprocess.py
 
 echo "⚙️ Running stage2_combine_clean.py..."
-python stage2_combine_clean.py
+stage2_characterize_dedup.py
 
 # Run training
 echo "⚙️ Running training script..."
-python train_codegen.py
+stage3_active_train_tpu.py
 
 echo "✅ All stages complete."
