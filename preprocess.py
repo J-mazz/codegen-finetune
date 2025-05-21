@@ -1,155 +1,194 @@
-# preprocess.py (for Active Learning Pipeline - Stage 1)
+# preprocess.py (for Active Learning Pipeline - Stage 1 - New C & Rust Datasets)
 
 import os
 import json
-from datasets import load_dataset, IterableDataset
+from datasets import load_dataset, IterableDataset # IterableDataset might not be used if all stream=False
 from tqdm.auto import tqdm
 import logging
 import ast # For a very basic Python code viability check
 
 # --- Configuration ---
-# Output directory for this stage's processed JSONL files
 PROCESSED_JSONL_DIR = "./processed_jsonl_stage1"
 os.makedirs(PROCESSED_JSONL_DIR, exist_ok=True)
-
-# Minimum length for raw_content to be considered viable
 MIN_CONTENT_LENGTH = 20 # Characters
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Datasets Configuration ---
-# Define datasets to process.
-# 'id': A unique identifier for this dataset configuration.
-# 'hf_name': Hugging Face dataset name.
-# 'subset': Specific subset/data_dir if applicable (e.g., for 'the-stack-dedup').
-# 'language': The programming language for this data.
-# 'split': Dataset split to use (e.g., 'train').
-# 'content_fields': List of field names to try for extracting the main code/text content.
-#                   The script will use the first field found that contains non-empty string data.
-# 'combine_fields_separator': If multiple fields are specified and found, how to join them.
-#                             Set to None if only one field should be used or if specific handling is needed.
-# 'solution_language_filter': For datasets like APPS where solutions are multi-lingual within a record.
-#                             Set to the language to filter for (e.g., "python").
-# 'max_samples': Maximum number of samples to process from this dataset.
-# 'stream': Whether to use streaming (load_dataset(..., stream=True)). Recommended for large datasets.
-# 'trust_remote_code': Set to True if the dataset loading requires it.
+# --- Datasets Configuration (New C & Rust Datasets) ---
 DATASETS_CONFIG = [
-    # --- Python Foundation ---
+    # --- Python Foundation (All Non-Streaming) ---
     {"id": "mbpp_py", "hf_name": "mbpp", "subset": None, "language": "python", "split": "train",
      "content_fields": ["text", "code"], "combine_fields_separator": "\n\n# Solution:\n",
      "max_samples": 10000, "stream": False, "trust_remote_code": False},
     {"id": "humaneval_py", "hf_name": "openai_humaneval", "subset": None, "language": "python", "split": "test",
      "content_fields": ["prompt", "canonical_solution"], "combine_fields_separator": "\n",
-     "max_samples": 2000, "stream": False, "trust_remote_code": False}, # Test split has problems
+     "max_samples": 2000, "stream": False, "trust_remote_code": False},
     {"id": "apps_py", "hf_name": "codeparrot/apps", "subset": None, "language": "python", "split": "train",
      "content_fields": ["problem", "solutions"], "combine_fields_separator": "\n\n# Solutions:\n",
-     "solution_language_filter": "python", # Special handling for 'solutions' field
-     "max_samples": 20000, "stream": False, "trust_remote_code": False}, # Reduced from 50k for initial run
+     "solution_language_filter": "python", # Special handling in get_content_from_example
+     "max_samples": 50, "stream": False, "trust_remote_code": False},
     {"id": "codeforces_py", "hf_name": "MatrixStudio/Codeforces-Python-Submissions", "subset": None, "language": "python", "split": "train",
      "content_fields": ["code"], "combine_fields_separator": None,
-     "max_samples": 50000, "stream": False, "trust_remote_code": False}, # Reduced from 100k
+     "max_samples": 50000, "stream": False, "trust_remote_code": False},
     {"id": "alpaca_py_instr", "hf_name": "iamtarun/python_code_instructions_18k_alpaca", "subset": None, "language": "python", "split": "train",
      "content_fields": ["instruction", "output"], "combine_fields_separator": "\n\n# Output:\n",
-     "max_samples": 18000, "stream": False, "trust_remote_code": False}, # Max is ~18k
-    {"id": "the_stack_py_small", "hf_name": "bigcode/the-stack-dedup", "subset": "data/python", "language": "python", "split": "train",
-     "content_fields": ["content"], "combine_fields_separator": None,
-     "max_samples": 200000, "stream": True, "trust_remote_code": False}, # Reduced from 500k
+     "max_samples": 18000, "stream": False, "trust_remote_code": False},
 
-    # --- C++ ---
-    {"id": "the_stack_cpp_small", "hf_name": "bigcode/the-stack-dedup", "subset": "data/cpp", "language": "cpp", "split": "train",
-     "content_fields": ["content"], "combine_fields_separator": None,
-     "max_samples": 100000, "stream": True, "trust_remote_code": False}, # Reduced from 200k
+    # --- C++ (Using deepmind/code_contests) ---
+    {"id": "cpp_code_contests",
+     "hf_name": "deepmind/code_contests",
+     "subset": None, 
+     "language": "cpp", "split": "train", 
+     "content_fields": ["description"], 
+     "solutions_field": "solutions", 
+     "solution_lang_key": "language", 
+     "solution_code_key": "solution", 
+     "combine_fields_separator": "\n\n// Solution:\n",
+     "max_samples": 10000, "stream": False, "trust_remote_code": True},
 
-    # --- Java ---
-    {"id": "the_stack_java_small", "hf_name": "bigcode/the-stack-dedup", "subset": "data/java", "language": "java", "split": "train",
-     "content_fields": ["content"], "combine_fields_separator": None,
-     "max_samples": 100000, "stream": True, "trust_remote_code": False}, # Reduced from 200k
+    # --- Java (Using deepmind/code_contests) ---
+    {"id": "java_code_contests",
+     "hf_name": "deepmind/code_contests",
+     "subset": None,
+     "language": "java", "split": "train",
+     "content_fields": ["description"],
+     "solutions_field": "solutions", "solution_lang_key": "language", "solution_code_key": "solution",
+     "combine_fields_separator": "\n\n// Solution:\n",
+     "max_samples": 10000, "stream": False, "trust_remote_code": True},
+    
+    # --- Rust (New Suggested Dataset) ---
+    {"id": "rust_code_snippets_new",
+     "hf_name": "RustHint/Rust_Code_Snippets", # New suggestion - VERIFY this dataset and its fields
+     "subset": None,
+     "language": "rust", "split": "train", # VERIFY split name
+     "content_fields": ["Snippet"], # VERIFY THIS FIELD NAME for this dataset (e.g., "Snippet", "code", "text")
+     "combine_fields_separator": None,
+     "max_samples": 5000, "stream": False, "trust_remote_code": False},
 
-    # --- Rust ---
-    {"id": "the_stack_rust_small", "hf_name": "bigcode/the-stack-dedup", "subset": "data/rust", "language": "rust", "split": "train",
-     "content_fields": ["content"], "combine_fields_separator": None,
-     "max_samples": 50000, "stream": True, "trust_remote_code": False}, # Reduced from 100k
-
-    # --- C ---
-    {"id": "the_stack_c_small", "hf_name": "bigcode/the-stack-dedup", "subset": "data/c", "language": "c", "split": "train",
-     "content_fields": ["content"], "combine_fields_separator": None,
-     "max_samples": 50000, "stream": True, "trust_remote_code": False}, # Reduced from 100k
+    # --- C (New Suggested Dataset) ---
+    {"id": "c_code_snippets_new",
+     "hf_name": "nampdn-ai/C-Code-Snippets", # New suggestion - VERIFY this dataset and its fields
+     "subset": None,
+     "language": "c", "split": "train", # VERIFY split name
+     "content_fields": ["Text"], # VERIFY THIS FIELD NAME for this dataset (e.g., "Text", "code")
+     "combine_fields_separator": None,
+     "max_samples": 10000, "stream": False, "trust_remote_code": False},
 ]
 
 def get_content_from_example(example, config):
-    """
-    Extracts and combines content from specified fields in an example.
-    Handles special case for APPS 'solutions' field.
-    """
     contents_to_join = []
-    
-    if config["id"].startswith("apps_") and "solutions" in config["content_fields"]:
-        # Handle APPS 'solutions' field which is a list of strings (JSON encoded)
-        # and needs to be filtered by language if solution_language_filter is set.
-        # We'll take the problem description and append Python solutions.
-        problem_desc = ""
-        if "problem" in example and isinstance(example["problem"], str) and example["problem"].strip():
-            problem_desc = example["problem"].strip()
+    description_part = ""
+    solution_part = ""
+
+    # Handle problem description using content_fields (usually the first one)
+    if config.get("content_fields"):
+        for field in config["content_fields"]:
+            if field in example and isinstance(example[field], str) and example[field].strip():
+                description_part = example[field].strip()
+                break # Take the first valid description field
+
+    # Special handling for datasets with structured solutions (like deepmind/code_contests)
+    if config["hf_name"] == "deepmind/code_contests":
+        solutions_field_name = config.get("solutions_field", "solutions")
+        lang_key = config.get("solution_lang_key", "language")
+        code_key = config.get("solution_code_key", "solution")
+        target_language_lower = config["language"].lower()
         
-        solutions_text = ""
+        if solutions_field_name in example and isinstance(example[solutions_field_name], list):
+            for sol_dict in example[solutions_field_name]:
+                if isinstance(sol_dict, dict) and \
+                   lang_key in sol_dict and \
+                   code_key in sol_dict and \
+                   isinstance(sol_dict[code_key], str) and \
+                   sol_dict[code_key].strip():
+                    
+                    sol_lang_field = sol_dict[lang_key]
+                    lang_match = False
+                    if isinstance(sol_lang_field, str):
+                        normalized_sol_lang = sol_lang_field.lower().replace("3", "").replace(" ", "")
+                        if "c++" in normalized_sol_lang: normalized_sol_lang = "cpp"
+                        if normalized_sol_lang == target_language_lower:
+                            lang_match = True
+                    elif isinstance(sol_lang_field, list): 
+                        for lang_item in sol_lang_field:
+                            if isinstance(lang_item, str):
+                                normalized_sol_lang = lang_item.lower().replace("3", "").replace(" ", "")
+                                if "c++" in normalized_sol_lang: normalized_sol_lang = "cpp"
+                                if normalized_sol_lang == target_language_lower:
+                                    lang_match = True
+                                    break
+                    if lang_match:
+                        solution_part = sol_dict[code_key].strip()
+                        break 
+        if not solution_part:
+            return None
+
+    elif config["id"].startswith("apps_py"): 
+        if "problem" in example and isinstance(example["problem"], str) and example["problem"].strip():
+            description_part = example["problem"].strip()
+        
         if "solutions" in example and isinstance(example["solutions"], list):
-            # Assuming solutions are JSON strings that need to be parsed if they are not already dicts/lists of strings
-            # For APPS, 'solutions' are typically lists of strings.
-            # We are looking for Python solutions.
-            # This part might need adjustment based on the exact structure of APPS 'solutions'.
-            # For now, let's assume it's a list of code strings.
-            # A more robust way would be to check if the dataset loader already parsed them.
-            # If `solution_language_filter` is Python, we'd ideally filter here.
-            # For simplicity, we'll join them for now. Stage 2 can do more advanced filtering.
-            # This example assumes solutions are directly usable strings.
-            if config.get("solution_language_filter") == "python":
-                 # This is a placeholder; APPS dataset solutions are not tagged by language *within* the list.
-                 # The dataset itself is often filtered by language when loading or has language-specific versions.
-                 # If solutions were dicts with a 'language' key, we could filter.
-                 # For now, we assume if config["language"] is python, all solutions are python.
-                python_solutions = [s for s in example["solutions"] if isinstance(s, str)] # Basic check
-                if python_solutions:
-                    solutions_text = f"\n# Python Solutions:\n" + "\n\n---\n\n".join(python_solutions)
+            parsed_python_solutions = []
+            for sol_item in example["solutions"]:
+                if isinstance(sol_item, str):
+                    try:
+                        actual_solutions_list = json.loads(sol_item)
+                        if isinstance(actual_solutions_list, list):
+                           parsed_python_solutions.extend([s for s in actual_solutions_list if isinstance(s, str)])
+                    except json.JSONDecodeError: 
+                        if not getattr(get_content_from_example, f"_logged_apps_json_error_{config['id']}", False):
+                            logger.warning(f"APPS ({config['id']}): Could not decode one or more solution JSON strings. Example: {sol_item[:100]}. Further similar warnings will be suppressed.")
+                            setattr(get_content_from_example, f"_logged_apps_json_error_{config['id']}", True)
+                elif isinstance(sol_item, list): 
+                    parsed_python_solutions.extend([s for s in sol_item if isinstance(s, str)])
+            if parsed_python_solutions:
+                solution_part = "\n\n---\n\n".join(parsed_python_solutions)
+        if not description_part and not solution_part: return None
 
-        if problem_desc:
-            return problem_desc + solutions_text if solutions_text else problem_desc
-        return None # Or just solutions_text if no problem_desc
+    else: # General case: extract from content_fields (This will apply to the new C and Rust datasets)
+        temp_contents = []
+        for field in config.get("content_fields", []): # Ensure content_fields is treated as a list
+            if field in example and isinstance(example[field], str) and example[field].strip():
+                temp_contents.append(example[field].strip())
+            elif field in example and isinstance(example[field], list) and all(isinstance(i, str) for i in example[field]):
+                temp_contents.append("\n".join(item.strip() for item in example[field] if item.strip()))
+        
+        if not temp_contents: return None # If no content found in specified fields
+        
+        # For simpler datasets, assume the first (or only) content_field is the main code/text
+        # If description_part is already set (e.g. for code_contests), this won't overwrite it.
+        # If description_part is empty, this becomes the main content.
+        if not description_part and temp_contents: 
+            description_part = temp_contents[0] 
+            # If by chance multiple fields were listed and all had content, and it's not a structured solution type,
+            # we might just take the first, or log a warning and combine.
+            if len(temp_contents) > 1 : 
+                logger.warning(f"Dataset {config['id']} has multiple content_fields and is not a known structured type (like code_contests/apps). Using content from '{config.get('content_fields')[0]}'. Other fields: {config.get('content_fields')[1:]}")
+                # Or, if combining is desired for these general cases:
+                # description_part = "\n".join(temp_contents)
 
-    # General case for other datasets
-    for field in config["content_fields"]:
-        if field in example and isinstance(example[field], str) and example[field].strip():
-            contents_to_join.append(example[field].strip())
-        elif field in example and isinstance(example[field], list) and all(isinstance(i, str) for i in example[field]):
-            # If field is a list of strings, join them
-            contents_to_join.append("\n".join(item.strip() for item in example[field] if item.strip()))
-
-
-    if not contents_to_join:
-        return None
+    # Combine description and solution if both exist and a separator is defined
+    if description_part and solution_part and config.get("combine_fields_separator"):
+        return description_part + config["combine_fields_separator"] + solution_part
+    elif solution_part: # If only solution part was populated (e.g. for code_contests if description was empty)
+        return solution_part
+    elif description_part: # If only description part (common for datasets with just one content field)
+        return description_part
     
-    if config["combine_fields_separator"] is not None and len(contents_to_join) > 1:
-        return config["combine_fields_separator"].join(contents_to_join)
-    elif contents_to_join:
-        return contents_to_join[0] # Use the first one found if no separator or only one field
     return None
 
 
 def is_viable_python_code(code_content):
-    """
-    A very basic check to see if the content might be Python code
-    by trying to parse it with ast.
-    Returns True if parsable or not Python, False if it's Python and fails to parse.
-    """
     try:
         ast.parse(code_content)
-        return True  # Parsable, so it's valid Python syntax
-    except (SyntaxError, ValueError, TypeError, MemoryError): # Added more exceptions
-        return False # Fails to parse, likely not valid standalone Python
+        return True
+    except (SyntaxError, ValueError, TypeError, MemoryError):
+        return False
 
 def main():
-    logger.info("🚀 Starting Stage 1: Raw Data Ingestion and Initial Cleaning...")
+    logger.info("🚀 Starting Stage 1: Raw Data Ingestion and Initial Cleaning (New C & Rust Datasets)...")
     total_records_processed_all = 0
     total_records_written_all = 0
 
@@ -162,68 +201,111 @@ def main():
 
         processed_count = 0
         written_count = 0
-
+        
         try:
-            # Load dataset
-            ds_args = {"path": config["hf_name"], "split": config["split"], "streaming": config["stream"]}
-            if config["subset"]:
-                ds_args["data_dir"] = config["subset"]
+            current_stream_setting = config.get("stream", False)
+            if config['language'] != 'python' and current_stream_setting:
+                logger.info(f"  Overriding stream to False for {config['id']} ({config['language']}) as per non-streaming preference.")
+                current_stream_setting = False
+
+            ds_args = {"path": config["hf_name"], "split": config["split"], "streaming": current_stream_setting}
+            
+            if config.get("subset"): 
+                ds_args["name"] = config["subset"] # 'name' is often used for specific configurations within a dataset
+            
             if config.get("trust_remote_code"):
                 ds_args["trust_remote_code"] = config["trust_remote_code"]
             
+            logger.info(f"  Attempting to load dataset with args: {ds_args}")
             dataset = load_dataset(**ds_args)
+            logger.info(f"  Dataset loaded. Type: {type(dataset)}")
 
-            if config["stream"] and isinstance(dataset, IterableDataset):
-                dataset_iterable = dataset.take(config["max_samples"])
-                # For streamed datasets, getting total count upfront is not straightforward.
-                # We'll count as we go.
-            else: # Not streaming or not an IterableDataset (though load_dataset with stream=True should yield IterableDataset)
-                # If not streaming, we can shuffle and select if desired, but for now, just take head.
-                if len(dataset) > config["max_samples"]:
-                     # This might be slow for very large non-streamed datasets.
-                     # Consider dataset.select(range(config["max_samples"]))
-                    dataset_iterable = dataset.select(range(config["max_samples"]))
-                else:
-                    dataset_iterable = dataset
-                logger.info(f"  Total raw examples available (or selected): {len(dataset_iterable)} for {config['id']}")
+            first_example = None
+            dataset_iterable_main_loop = None 
 
+            try:
+                if current_stream_setting and isinstance(dataset, IterableDataset):
+                    peek_iter = dataset.take(1)
+                    first_example = next(iter(peek_iter), None)
+                    dataset_iterable_main_loop = dataset.take(config["max_samples"]) 
+                elif not current_stream_setting: 
+                    if len(dataset) > 0:
+                        first_example = dataset[0]
+                        num_to_select = min(config["max_samples"], len(dataset))
+                        dataset_iterable_main_loop = dataset.select(range(num_to_select))
+                    else: 
+                        logger.warning(f"  Dataset {config['id']} is empty after loading. Skipping.")
+                        continue
+                else: 
+                     logger.warning(f"  Unexpected dataset type or state for {config['id']}. Type: {type(dataset)}. Skipping.")
+                     continue
+            except StopIteration: 
+                logger.warning(f"  Dataset {config['id']} (streamed) yielded no items for inspection (or is empty). Skipping.")
+                continue
+            except Exception as e_inspect:
+                logger.warning(f"  Could not retrieve first example from {config['id']} for inspection: {e_inspect}. Skipping.")
+                continue
+            
+            if not first_example:
+                 logger.warning(f"  Dataset {config['id']} is effectively empty or first example could not be fetched. Skipping.")
+                 continue
+
+            primary_content_fields = config.get("content_fields", [])
+            missing_fields = [f for f in primary_content_fields if f not in first_example]
+            
+            if config["hf_name"] == "deepmind/code_contests": # Check structure for code_contests
+                solutions_field = config.get("solutions_field", "solutions")
+                if solutions_field not in first_example:
+                    missing_fields.append(solutions_field)
+                elif isinstance(first_example.get(solutions_field), list) and len(first_example[solutions_field]) > 0:
+                    sol_dict_example = first_example[solutions_field][0]
+                    if not isinstance(sol_dict_example, dict):
+                         missing_fields.append(f"{solutions_field} items are not dicts")
+                    else:
+                        if config.get("solution_lang_key") not in sol_dict_example:
+                            missing_fields.append(config.get("solution_lang_key"))
+                        if config.get("solution_code_key") not in sol_dict_example:
+                            missing_fields.append(config.get("solution_code_key"))
+            
+            if missing_fields:
+                logger.error(f"  Skipping dataset {config['id']} due to missing fields in the first example: {missing_fields}.")
+                logger.error(f"    Available fields in first example: {list(first_example.keys())}")
+                continue
+            
+            if dataset_iterable_main_loop is None: 
+                logger.error(f"  Dataset iterable for {config['id']} was not properly initialized. Skipping.")
+                continue
+
+            logger.info(f"  Processing examples for {config['id']} (Max: {config['max_samples']})")
 
             with open(output_file_path, "w", encoding="utf-8") as outfile:
-                for example in tqdm(dataset_iterable, desc=f"  Iterating {config['id']}", unit=" examples"):
+                iterator_for_tqdm = tqdm(dataset_iterable_main_loop, desc=f"  Iterating {config['id']}", unit=" examples", leave=False)
+                
+                for example in iterator_for_tqdm:
                     processed_count += 1
                     raw_content = get_content_from_example(example, config)
 
                     if not raw_content or len(raw_content) < MIN_CONTENT_LENGTH:
                         continue
-
-                    # Basic viability check specifically for Python code using AST parsing
-                    # For other languages, this check is skipped.
+                    
                     if config["language"] == "python":
                         if not is_viable_python_code(raw_content):
-                            # This might be too aggressive if 'raw_content' includes prompts + code.
-                            # Consider applying only if content is expected to be *just* code.
-                            # For now, we'll log it if it fails.
-                            # logger.debug(f"    Skipping non-viable Python AST for content: {raw_content[:100]}...")
-                            pass # Keep it for now, Stage 2 can do more advanced checks
+                            pass
 
-                    # Try to get an original ID if available, otherwise use processed_count
-                    original_id = example.get("id", example.get("example_id", f"{config['id']}_{processed_count}"))
-
-
+                    original_id = example.get("id", example.get("name", example.get("problem_id", f"{config['id']}_{processed_count}")))
                     record = {
-                        "original_id": str(original_id), # Ensure ID is string
-                        "source_config_id": config["id"], # Which config entry this came from
+                        "original_id": str(original_id),
+                        "source_config_id": config["id"],
                         "source_hf_name": config["hf_name"],
                         "language": config["language"],
                         "raw_content": raw_content
                     }
                     outfile.write(json.dumps(record) + "\n")
                     written_count += 1
-
-                    if written_count >= config["max_samples"] and not config["stream"]: # Already handled by .take for stream
-                        break
             
             logger.info(f"  Finished {config['id']}. Processed: {processed_count}. Written: {written_count} to {output_file_path}")
+            if written_count == 0 and processed_count > 0:
+                 logger.warning(f"  Warning: Processed {processed_count} for {config['id']} but wrote 0 records. Check content extraction, filtering, or language matching (e.g., for code_contests).")
 
         except Exception as e:
             logger.error(f"❌ Error processing {config['id']}: {e}", exc_info=True)
