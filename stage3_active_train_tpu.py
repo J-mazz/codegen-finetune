@@ -1,4 +1,4 @@
-# stage3_active_train_tpu.py (Advanced Phased & Validated Active Learning Cycle - TPU Adapted)
+# stage3_active_train.py (Advanced Phased & Validated Active Learning Cycle - GPU/CPU Adapted)
 
 import os
 import json
@@ -12,22 +12,11 @@ import logging
 import shutil 
 import sys 
 
-# --- XLA/TPU Specific Imports ---
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.parallel_loader as pl # For multi-core, if used later
-    # import torch_xla.distributed.xla_multiprocessing as xmp # For multi-core spawning
-    _IS_XLA_AVAILABLE = True
-except ImportError:
-    print("WARNING: torch_xla not found. Falling back to CPU/GPU. TPU training will not be possible.")
-    _IS_XLA_AVAILABLE = False
-
 # --- Configuration ---
 STAGE2_OUTPUT_POOL = "./active_learn_pool.jsonl"
 BASE_MODEL_NAME = "Salesforce/codegen-350M-mono"
-OUTPUT_DIR_BASE = "./active_learning_cycle_0_tpu" # Changed output dir name
-LOG_FILE = os.path.join(OUTPUT_DIR_BASE, "s3_active_train_cycle_0_tpu.log")
+OUTPUT_DIR_BASE = "./active_learning_cycle_0_gpu_cpu" # Changed output dir name
+LOG_FILE = os.path.join(OUTPUT_DIR_BASE, "s3_active_train_cycle_0_gpu_cpu.log")
 
 # --- Ensure Output Directories Exist ---
 try:
@@ -61,16 +50,9 @@ except Exception as e:
     logger = FallbackLogger()
     logger.error(f"Using fallback print-based logger due to basicConfig failure: {e}")
 
-# --- Device Setup (Handles TPU, GPU, CPU) ---
-if _IS_XLA_AVAILABLE:
-    device = xm.xla_device()
-    logger.info(f"Using XLA/TPU device: {device}")
-    # For multi-core TPU, you'd typically use xmp.spawn here.
-    # This script is set for single XLA device operation for simplicity first.
-    # If xm.xla_device() is called inside an xmp.spawn process, it gets the right core.
-else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device} (torch_xla not available or failed to import)")
+# --- Device Setup (GPU/CPU) ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Using device: {device}")
 
 
 # --- Phased Training Configuration ---
@@ -119,8 +101,7 @@ TRAINING_PHASES = [
 
 # General Training Hyperparameters
 MAX_SEQ_LENGTH = 512
-BATCH_SIZE = 8 # Can often be larger on TPUs per core, adjust based on TPU type and memory
-                # Effective batch size will be BATCH_SIZE * number of XLA devices if using data parallelism
+BATCH_SIZE = 2 # Adjust based on GPU memory
 VALIDATION_SPLIT_RATIO = 0.15
 EARLY_STOPPING_PATIENCE = 3
 
@@ -193,7 +174,7 @@ class FineTuningDataset(TorchDataset):
                 max_length=self.max_length,
                 padding="max_length", 
                 truncation=True,
-                return_tensors="pt" # Keep as PT, DataLoader will handle batching
+                return_tensors="pt" 
             )
             return {
                 "input_ids": inputs.input_ids.squeeze(0),
@@ -306,8 +287,8 @@ def select_data_for_phase(data_pool, num_main_samples, language_filter,
 
 
 # --- Create DataLoaders ---
-def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ratio, current_device):
-    logger.debug(f"create_dataloaders called with {len(records)} records for device: {current_device}")
+def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ratio): # Removed current_device, using global `device`
+    logger.debug(f"create_dataloaders called with {len(records)} records.")
     if not records:
         logger.warning("Cannot create dataloaders from empty record list.")
         return None, None
@@ -344,32 +325,16 @@ def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ra
     else:
         logger.info("Validation split ratio is 0 or dataset too small for split, using all data for training.")
 
-    # For XLA, DataLoader is usually wrapped by pl.ParallelLoader if using multiple cores.
-    # For a single XLA device, standard DataLoader is often fine.
-    # num_workers can be 0 for TPUs, or >0 if data loading is complex and benefits from CPU parallelism.
-    # pin_memory is typically for CUDA.
-    
-    # if _IS_XLA_AVAILABLE and xm.xrt_world_size() > 1: # Multi-core XLA
-    #     train_sampler = torch.utils.data.distributed.DistributedSampler(
-    #         train_dataset,
-    #         num_replicas=xm.xrt_world_size(),
-    #         rank=xm.get_ordinal(),
-    #         shuffle=True
-    #     )
-    #     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=1) # Often 1 worker per core
-    #     if val_dataset and len(val_dataset) > 0:
-    #         val_sampler = torch.utils.data.distributed.DistributedSampler(
-    #             val_dataset,
-    #             num_replicas=xm.xrt_world_size(),
-    #             rank=xm.get_ordinal(),
-    #             shuffle=False 
-    #         )
-    #         val_dataloader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=1)
-    #     else:
-    #         val_dataloader = None
-    # else: # Single device (CPU, GPU, or single XLA core)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size) if val_dataset and len(val_dataset) > 0 else None
+    # GPU/CPU DataLoader settings
+    # num_workers > 0 can speed up data loading if it's a bottleneck.
+    # pin_memory=True is for CUDA to speed up host-to-device transfers.
+    num_dataloader_workers = 2 if device.type == 'cuda' else 0 # Example: use workers for GPU
+    pin_memory_setting = True if device.type == 'cuda' else False
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                                  num_workers=num_dataloader_workers, pin_memory=pin_memory_setting)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, 
+                                num_workers=num_dataloader_workers, pin_memory=pin_memory_setting) if val_dataset and len(val_dataset) > 0 else None
     
     logger.info(f"Created Train Dataloader with {len(train_dataloader) if train_dataloader else 0} batches.")
     if val_dataloader:
@@ -379,12 +344,12 @@ def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ra
         
     return train_dataloader, val_dataloader
 
-# --- Training and Validation Function (TPU Adapted) ---
+# --- Training and Validation Function (GPU/CPU Adapted) ---
 def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, learning_rate, 
                     warmup_ratio, model_save_dir, phase_name, patience, 
-                    freeze_config=None, current_device=None): # Pass current_device
+                    freeze_config=None): 
     
-    logger.info(f"Entering fine_tune_phase for '{phase_name}'. Train Dataloader: {len(train_dataloader) if train_dataloader else 'None'} batches. Device: {current_device}")
+    logger.info(f"Entering fine_tune_phase for '{phase_name}'. Train Dataloader: {len(train_dataloader) if train_dataloader else 'None'} batches.")
 
     if os.path.exists(model_save_dir):
         logger.info(f"Clearing previous best model directory for phase '{phase_name}': {model_save_dir}")
@@ -421,6 +386,15 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
         optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_total_training_steps
     )
     
+    # For GPU mixed precision (NVIDIA GPUs with Tensor Cores like T4, V100, A100)
+    scaler = None
+    use_amp = False # Automatic Mixed Precision
+    if device.type == 'cuda' and hasattr(torch.cuda.amp, 'GradScaler'):
+        scaler = torch.cuda.amp.GradScaler()
+        use_amp = True
+        logger.info("CUDA device detected. Using Automatic Mixed Precision (AMP).")
+
+
     best_val_loss = float('inf')
     best_val_accuracy = 0.0 
     epochs_no_improve = 0
@@ -465,40 +439,39 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
         total_train_loss = 0
         num_train_batches = 0
         
-        # For XLA multi-core, wrap DataLoader with pl.ParallelLoader
-        # if _IS_XLA_AVAILABLE and xm.xrt_world_size() > 1:
-        #     para_loader = pl.ParallelLoader(train_dataloader, [current_device])
-        #     epoch_train_loader = para_loader.per_device_loader(current_device)
-        # else:
         epoch_train_loader = train_dataloader
 
-        train_progress_bar = tqdm(epoch_train_loader, desc=f"  Epoch {epoch + 1} Training", leave=False, disable=(_IS_XLA_AVAILABLE and xm.get_ordinal() != 0) ) # Disable tqdm on non-master XLA process
+        train_progress_bar = tqdm(epoch_train_loader, desc=f"  Epoch {epoch + 1} Training", leave=False)
 
         for batch_idx, batch in enumerate(train_progress_bar):
             try:
                 optimizer.zero_grad()
-                input_ids = batch["input_ids"].to(current_device) # Use current_device
-                attention_mask = batch["attention_mask"].to(current_device) # Use current_device
+                input_ids = batch["input_ids"].to(device) 
+                attention_mask = batch["attention_mask"].to(device) 
                 labels = input_ids.clone()
                 if tokenizer.pad_token_id is not None:
                     labels[labels == tokenizer.pad_token_id] = -100 
 
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
+                if use_amp:
+                    with torch.cuda.amp.autocast():
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                        loss = outputs.loss
+                    if loss is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                else: # Not using AMP
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss
+                    if loss is not None:
+                        loss.backward()
+                        optimizer.step()
                 
                 if loss is not None:
-                    loss.backward()
-                    # For XLA, optimizer step is different
-                    if _IS_XLA_AVAILABLE:
-                        xm.optimizer_step(optimizer) # barrier=True by default if not specified
-                    else:
-                        optimizer.step()
-                    
                     scheduler.step() 
                     total_train_loss += loss.item()
                     num_train_batches += 1
-                    if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Only master process updates tqdm
-                        train_progress_bar.set_postfix({'loss': loss.item(), 'lr': scheduler.get_last_lr()[0]})
+                    train_progress_bar.set_postfix({'loss': loss.item(), 'lr': scheduler.get_last_lr()[0]})
                 else:
                     logger.warning(f"  Training (Batch {batch_idx}): Loss is None. Skipping backprop.")
             except Exception as e_batch:
@@ -506,11 +479,9 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                 continue 
         
         avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else float('nan')
-        if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Only master process logs epoch summary
-            logger.info(f"  Phase '{phase_name}' - Epoch {epoch + 1} Training finished. Average Loss: {avg_train_loss:.4f}")
+        logger.info(f"  Phase '{phase_name}' - Epoch {epoch + 1} Training finished. Average Loss: {avg_train_loss:.4f}")
 
-        # Validation loop (run on master XLA process or if not XLA)
-        if val_dataloader and len(val_dataloader) > 0 and (not _IS_XLA_AVAILABLE or xm.is_master_ordinal()):
+        if val_dataloader and len(val_dataloader) > 0:
             logger.info(f"  Phase '{phase_name}' - Epoch {epoch + 1} Starting Validation...")
             model.eval() 
             total_val_loss = 0
@@ -518,10 +489,6 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
             total_val_target_tokens = 0
             num_val_batches = 0
             
-            # if _IS_XLA_AVAILABLE and xm.xrt_world_size() > 1:
-            #     para_loader_val = pl.ParallelLoader(val_dataloader, [current_device])
-            #     epoch_val_loader = para_loader_val.per_device_loader(current_device)
-            # else:
             epoch_val_loader = val_dataloader
 
             val_progress_bar = tqdm(epoch_val_loader, desc=f"  Epoch {epoch + 1} Validation", leave=False)
@@ -529,8 +496,8 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
             with torch.no_grad():
                 for batch_idx_val, batch_val in enumerate(val_progress_bar): 
                     try:
-                        input_ids = batch_val["input_ids"].to(current_device) 
-                        attention_mask = batch_val["attention_mask"].to(current_device) 
+                        input_ids = batch_val["input_ids"].to(device) 
+                        attention_mask = batch_val["attention_mask"].to(device) 
                         labels = input_ids.clone()
                         if tokenizer.pad_token_id is not None:
                             labels_for_loss = labels.clone()
@@ -538,7 +505,12 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                         else:
                             labels_for_loss = labels
                         
-                        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels_for_loss)
+                        if use_amp:
+                            with torch.cuda.amp.autocast():
+                                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels_for_loss)
+                        else:
+                            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels_for_loss)
+                        
                         loss = outputs.loss
                         logits = outputs.logits
 
@@ -547,9 +519,9 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                         else:
                             logger.warning(f"  Validation (Batch {batch_idx_val}): Loss is None.")
                         
-                        active_loss = attention_mask.view(-1) == 1 
-                        active_logits = logits.view(-1, model.config.vocab_size)[active_loss]
-                        active_labels = labels.view(-1)[active_loss]
+                        active_loss_mask = attention_mask.view(-1) == 1 # Use original attention_mask for active tokens
+                        active_logits = logits.view(-1, model.config.vocab_size)[active_loss_mask]
+                        active_labels = labels.view(-1)[active_loss_mask] # Use original labels for accuracy
 
                         if active_logits.size(0) > 0: 
                             preds = torch.argmax(active_logits, dim=1)
@@ -571,21 +543,8 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                 best_val_loss = avg_val_loss
                 best_val_accuracy = avg_val_accuracy 
                 try:
-                    # For XLA, saving should ideally be done by the master process.
-                    # xm.save is preferred for XLA tensors. HF's save_pretrained can work with xm.save.
-                    if _IS_XLA_AVAILABLE:
-                        xm.save(model.state_dict(), os.path.join(model_save_dir, "pytorch_model.bin")) # Save state_dict
-                        # Config and other files still need to be saved.
-                        # Simpler: model.save_pretrained(model_save_dir, save_function=xm.save)
-                        # but save_function might not always work perfectly with all HF model types.
-                        # For now, let's try the standard save_pretrained and see.
-                        # It might save on CPU after gathering.
-                        if xm.is_master_ordinal(): # Only master saves tokenizer & config
-                            model.config.save_pretrained(model_save_dir)
-                            tokenizer.save_pretrained(model_save_dir)
-                    else:
-                        model.save_pretrained(model_save_dir)
-                        tokenizer.save_pretrained(model_save_dir)
+                    model.save_pretrained(model_save_dir)
+                    tokenizer.save_pretrained(model_save_dir)
                     best_model_path_this_phase = model_save_dir
                 except Exception as e_save:
                     logger.error(f"  Error saving model during phase '{phase_name}': {e_save}", exc_info=True)
@@ -596,211 +555,143 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                 if epochs_no_improve >= patience:
                     logger.info(f"  Early stopping triggered for phase '{phase_name}' after {epoch + 1} epochs.")
                     break 
-        elif not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0) : # No validation, master process saves
+        else: 
             logger.info(f"  Phase '{phase_name}' - Epoch {epoch + 1} No validation set. Saving model directly to {model_save_dir}.")
             try:
-                if _IS_XLA_AVAILABLE:
-                    xm.save(model.state_dict(), os.path.join(model_save_dir, "pytorch_model.bin"))
-                    if xm.is_master_ordinal():
-                        model.config.save_pretrained(model_save_dir)
-                        tokenizer.save_pretrained(model_save_dir)
-                else:
-                    model.save_pretrained(model_save_dir) 
-                    tokenizer.save_pretrained(model_save_dir)
+                model.save_pretrained(model_save_dir) 
+                tokenizer.save_pretrained(model_save_dir)
                 best_model_path_this_phase = model_save_dir
             except Exception as e_save:
                  logger.error(f"  Error saving model (no validation) during phase '{phase_name}': {e_save}", exc_info=True)
         
-        if _IS_XLA_AVAILABLE:
-            xm.rendezvous(f'epoch_{epoch}_end_barrier') # Barrier for all XLA devices to sync
-
-    if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Master logs phase completion
-        logger.info(f"Fine-tuning phase '{phase_name}' complete. Best validation loss for phase: {best_val_loss:.4f}, Accuracy: {best_val_accuracy:.4f}")
+    logger.info(f"Fine-tuning phase '{phase_name}' complete. Best validation loss for phase: {best_val_loss:.4f}, Accuracy: {best_val_accuracy:.4f}")
     
     if not best_model_path_this_phase and val_dataloader and epochs > 0 and num_train_batches > 0 : 
          logger.warning(f"No best model was saved during phase '{phase_name}' based on validation loss. The model in memory is the last state from epoch {epoch+1}.")
-         # Saving last state might be complex with XLA, ensure it's done on master or correctly.
-         if not _IS_XLA_AVAILABLE or xm.is_master_ordinal():
-            last_state_path = os.path.join(model_save_dir, "last_state_after_no_improvement")
-            try:
-                os.makedirs(last_state_path, exist_ok=True)
-                logger.info(f"Saving last model state of phase '{phase_name}' to {last_state_path}")
-                if _IS_XLA_AVAILABLE:
-                    xm.save(model.state_dict(), os.path.join(last_state_path, "pytorch_model.bin"))
-                    model.config.save_pretrained(last_state_path)
-                    tokenizer.save_pretrained(last_state_path)
-                else:
-                    model.save_pretrained(last_state_path)
-                    tokenizer.save_pretrained(last_state_path)
-                return last_state_path 
-            except Exception as e_save_last:
-                logger.error(f"Error saving last model state for phase '{phase_name}': {e_save_last}", exc_info=True)
-                return None 
+         last_state_path = os.path.join(model_save_dir, "last_state_after_no_improvement")
+         try:
+            os.makedirs(last_state_path, exist_ok=True)
+            logger.info(f"Saving last model state of phase '{phase_name}' to {last_state_path}")
+            model.save_pretrained(last_state_path)
+            tokenizer.save_pretrained(last_state_path)
+            return last_state_path 
+         except Exception as e_save_last:
+            logger.error(f"Error saving last model state for phase '{phase_name}': {e_save_last}", exc_info=True)
+            return None 
     elif not val_dataloader and epochs > 0 and num_train_batches > 0: 
         best_model_path_this_phase = model_save_dir 
 
     return best_model_path_this_phase
 
 
-def _mp_fn(index, flags, main_function, tokenizer_name, data_pool_path): # Wrapper for xmp.spawn
-    """
-    Needed for xmp.spawn.
-    'index' is the XLA core ordinal.
-    'flags' can pass other configurations.
-    'main_function' is the actual main logic.
-    """
-    logger.info(f"XLA Process {index} (Ordinal: {xm.get_ordinal()}, World Size: {xm.xrt_world_size()}) started.")
-    # Call the main training logic, passing necessary components that can be pickled or re-initialized
-    main_function(tokenizer_name, data_pool_path, flags) # Pass flags if needed for more config
-    xm.rendezvous(f'main_process_end_barrier_{index}')
-    logger.info(f"XLA Process {index} finished.")
+def main():
+    try:
+        logger.info("🚀 Starting Stage 3: Advanced Phased and Validated Active Learning Cycle (GPU/CPU)...")
+        print("--- PRINT: Stage 3 main() started. ---") 
 
+        logger.info(f"Loading base tokenizer: {BASE_MODEL_NAME}")
+        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
+        if tokenizer.pad_token is None:
+            if tokenizer.eos_token:
+                tokenizer.pad_token = tokenizer.eos_token
+                logger.info(f"Tokenizer pad_token was None. Set to eos_token: {tokenizer.eos_token}")
+            else: 
+                tokenizer.add_special_tokens({'pad_token': '[PAD]'}) 
+                logger.warning("Tokenizer pad_token and eos_token were None. Added '[PAD]' as pad token.")
+        
+        current_model_path_or_name = BASE_MODEL_NAME 
 
-def main_training_logic(tokenizer_name_or_path, data_pool_path, cli_flags=None): # Renamed main to this
-    # This function contains the core logic that was previously in main()
-    # It's called by xmp.spawn for each TPU core, or directly if not using multi-core XLA.
-    
-    # Device is already set globally if _IS_XLA_AVAILABLE, or xm.xla_device() will get the core-specific device.
-    # If not XLA, global device is used.
-    current_device = xm.xla_device() if _IS_XLA_AVAILABLE else device
-    logger.info(f"Process {xm.get_ordinal() if _IS_XLA_AVAILABLE else 'N/A'} using device: {current_device}")
+        data_pool = load_data_pool(STAGE2_OUTPUT_POOL)
+        if not data_pool:
+            logger.error("Failed to load data pool or pool is empty. Exiting script.")
+            return
+        
+        all_used_sample_ids_in_cycle = set() 
 
+        for phase_idx, phase_config in enumerate(TRAINING_PHASES):
+            phase_name = phase_config["phase_name"]
+            phase_model_save_dir = os.path.join(OUTPUT_DIR_BASE, f"{phase_name}_best_model")
 
-    logger.info(f"Loading base tokenizer: {tokenizer_name_or_path}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-    if tokenizer.pad_token is None:
-        if tokenizer.eos_token:
-            tokenizer.pad_token = tokenizer.eos_token
-            logger.info(f"Tokenizer pad_token was None. Set to eos_token: {tokenizer.eos_token}")
-        else: 
-            tokenizer.add_special_tokens({'pad_token': '[PAD]'}) 
-            logger.warning("Tokenizer pad_token and eos_token were None. Added '[PAD]' as pad token.")
-    
-    current_model_path_or_name = BASE_MODEL_NAME 
-
-    # Data pool loading should happen on master process if not using distributed samplers for it,
-    # or each process loads it if it's small enough. For simplicity, let's assume it's loaded by all.
-    data_pool = load_data_pool(data_pool_path)
-    if not data_pool:
-        logger.error("Failed to load data pool or pool is empty. Exiting script.")
-        return
-    
-    all_used_sample_ids_in_cycle = set() 
-
-    for phase_idx, phase_config in enumerate(TRAINING_PHASES):
-        phase_name = phase_config["phase_name"]
-        # Ensure save dir is unique per process if needed, or only master saves.
-        # For now, assuming master process handles the "definitive" save.
-        phase_model_save_dir = os.path.join(OUTPUT_DIR_BASE, f"{phase_name}_best_model")
-
-
-        if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Master process logs phase start
             logger.info("\n" + "="*30 + f" Starting Phase {phase_idx+1}: {phase_name} " + "="*30)
-            print(f"\n--- PRINT: Starting Phase {phase_idx+1}: {phase_name} (Process: {xm.get_ordinal() if _IS_XLA_AVAILABLE else 'N/A'}) ---")
+            print(f"\n--- PRINT: Starting Phase {phase_idx+1}: {phase_name} ---")
             logger.info(f"Configuration for phase '{phase_name}': {phase_config}")
 
-        logger.info(f"Loading model from: {current_model_path_or_name} for phase '{phase_name}'")
-        try:
-            model = AutoModelForCausalLM.from_pretrained(current_model_path_or_name).to(current_device) # Use current_device
-            if tokenizer.pad_token_id is not None and model.config.pad_token_id is None:
-                logger.info(f"Setting model.config.pad_token_id to tokenizer's pad_token_id: {tokenizer.pad_token_id}")
-                model.config.pad_token_id = tokenizer.pad_token_id
-            if len(tokenizer) > model.config.vocab_size: 
-                logger.info(f"Resizing model token embeddings from {model.config.vocab_size} to {len(tokenizer)}")
-                model.resize_token_embeddings(len(tokenizer))
+            logger.info(f"Loading model from: {current_model_path_or_name} for phase '{phase_name}'")
+            try:
+                model = AutoModelForCausalLM.from_pretrained(current_model_path_or_name).to(device)
+                if tokenizer.pad_token_id is not None and model.config.pad_token_id is None:
+                    logger.info(f"Setting model.config.pad_token_id to tokenizer's pad_token_id: {tokenizer.pad_token_id}")
+                    model.config.pad_token_id = tokenizer.pad_token_id
+                if len(tokenizer) > model.config.vocab_size: 
+                    logger.info(f"Resizing model token embeddings from {model.config.vocab_size} to {len(tokenizer)}")
+                    model.resize_token_embeddings(len(tokenizer))
 
-        except Exception as e:
-            logger.error(f"Failed to load model from {current_model_path_or_name}: {e}. Skipping phase.", exc_info=True)
-            if _IS_XLA_AVAILABLE: xm.rendezvous(f'phase_{phase_idx}_error_barrier') # Sync processes on error
-            continue
-        
-        # Data selection can be done by master and broadcasted, or each process selects (if random seed is synced)
-        # For simplicity, each process selects, ensure random seeds are managed for reproducibility if needed.
-        selected_data, newly_selected_ids = select_data_for_phase(
-            data_pool, 
-            phase_config["num_samples"], 
-            language_filter=phase_config.get("language_filter"), 
-            python_replay_ratio=phase_config.get("python_replay_ratio", 0.0),
-            previously_selected_ids=all_used_sample_ids_in_cycle # This needs careful handling in multi-process
-        )
-        
-        if not selected_data:
-            logger.warning(f"No data selected for phase '{phase_name}'. Skipping phase.")
-            if _IS_XLA_AVAILABLE: xm.rendezvous(f'phase_{phase_idx}_no_data_barrier')
-            continue 
+            except Exception as e:
+                logger.error(f"Failed to load model from {current_model_path_or_name}: {e}. Skipping phase.", exc_info=True)
+                continue
+            
+            selected_data, newly_selected_ids = select_data_for_phase(
+                data_pool, 
+                phase_config["num_samples"], 
+                language_filter=phase_config.get("language_filter"), 
+                python_replay_ratio=phase_config.get("python_replay_ratio", 0.0),
+                previously_selected_ids=all_used_sample_ids_in_cycle
+            )
+            
+            if not selected_data:
+                logger.warning(f"No data selected for phase '{phase_name}'. Skipping phase.")
+                continue 
 
-        # For multi-process, all_used_sample_ids_in_cycle needs to be synchronized or handled per process.
-        # This simple version might lead to overlaps if not careful with multi-core XLA.
-        # For single XLA device, it's fine.
-        all_used_sample_ids_in_cycle.update(newly_selected_ids)
+            all_used_sample_ids_in_cycle.update(newly_selected_ids)
 
-        train_loader, val_loader = create_dataloaders(
-            selected_data, tokenizer, MAX_SEQ_LENGTH, BATCH_SIZE, VALIDATION_SPLIT_RATIO, current_device
-        )
+            train_loader, val_loader = create_dataloaders(
+                selected_data, tokenizer, MAX_SEQ_LENGTH, BATCH_SIZE, VALIDATION_SPLIT_RATIO
+            )
 
-        if not train_loader or len(train_loader) == 0 : 
-            logger.warning(f"Train loader for phase '{phase_name}' is empty. Skipping fine-tuning for this phase.")
-            if _IS_XLA_AVAILABLE: xm.rendezvous(f'phase_{phase_idx}_no_loader_barrier')
-            continue
+            if not train_loader or len(train_loader) == 0 : 
+                logger.warning(f"Train loader for phase '{phase_name}' is empty. Skipping fine-tuning for this phase.")
+                continue
 
-        initial_freeze_config = phase_config.get("freeze_layers_config")
-        if initial_freeze_config:
-            if initial_freeze_config.get("num_transformer_blocks_to_freeze", 0) > 0 or \
-               initial_freeze_config.get("num_embedding_layers_to_freeze", 0) > 0:
-                logger.info(f"Applying initial layer freezing for phase '{phase_name}'.")
-                model = freeze_model_layers(model, 
-                                            initial_freeze_config.get("num_embedding_layers_to_freeze",0),
-                                            initial_freeze_config.get("num_transformer_blocks_to_freeze",0))
-        else: 
-            logger.info(f"Ensuring all layers are trainable for phase '{phase_name}' (no initial freeze_config).")
-            model = unfreeze_all_layers(model) 
+            initial_freeze_config = phase_config.get("freeze_layers_config")
+            if initial_freeze_config:
+                if initial_freeze_config.get("num_transformer_blocks_to_freeze", 0) > 0 or \
+                   initial_freeze_config.get("num_embedding_layers_to_freeze", 0) > 0:
+                    logger.info(f"Applying initial layer freezing for phase '{phase_name}'.")
+                    model = freeze_model_layers(model, 
+                                                initial_freeze_config.get("num_embedding_layers_to_freeze",0),
+                                                initial_freeze_config.get("num_transformer_blocks_to_freeze",0))
+            else: 
+                logger.info(f"Ensuring all layers are trainable for phase '{phase_name}' (no initial freeze_config).")
+                model = unfreeze_all_layers(model) 
 
-        best_model_path_from_phase = fine_tune_phase(
-            model, tokenizer, train_loader, val_loader,
-            epochs=phase_config["epochs"], 
-            learning_rate=phase_config["learning_rate"],
-            warmup_ratio=phase_config["warmup_ratio"], 
-            model_save_dir=phase_model_save_dir,
-            phase_name=phase_name, 
-            patience=EARLY_STOPPING_PATIENCE,
-            freeze_config=initial_freeze_config,
-            current_device=current_device
-        )
+            best_model_path_from_phase = fine_tune_phase(
+                model, tokenizer, train_loader, val_loader,
+                epochs=phase_config["epochs"], 
+                learning_rate=phase_config["learning_rate"],
+                warmup_ratio=phase_config["warmup_ratio"], 
+                model_save_dir=phase_model_save_dir,
+                phase_name=phase_name, 
+                patience=EARLY_STOPPING_PATIENCE,
+                freeze_config=initial_freeze_config 
+            )
 
-        if best_model_path_from_phase:
-            current_model_path_or_name = best_model_path_from_phase 
-            if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Master logs
+            if best_model_path_from_phase:
+                current_model_path_or_name = best_model_path_from_phase 
                 logger.info(f"Phase '{phase_name}' complete. Best model for this phase at: {current_model_path_or_name}")
-        else:
-            if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Master logs
+            else:
                 logger.warning(f"Phase '{phase_name}' did not result in a saved best model. The model from '{current_model_path_or_name}' will be used for the next phase if applicable.")
-        
-        if _IS_XLA_AVAILABLE:
-            xm.rendezvous(f'phase_{phase_idx}_end_barrier') # Sync all processes at end of phase
 
-
-    if not (_IS_XLA_AVAILABLE and xm.get_ordinal() != 0): # Master logs final
         logger.info(f"✅ All training phases complete for this cycle. Final model considered is at: {current_model_path_or_name}")
+
+    except Exception as e_main:
+        logger.error("CRITICAL ERROR in main execution:", exc_info=True)
+        print(f"CRITICAL ERROR in main execution: {e_main}") 
+    finally:
+        logging.shutdown() 
+        print("--- PRINT: Stage 3 main() finished or errored out. ---")
 
 
 if __name__ == "__main__":
     print("--- PRINT: Stage 3 script __main__ block reached. ---")
-    # For multi-core XLA, you would use xmp.spawn(_mp_fn, args=(FLAGS, main_training_logic, ...), nprocs=N_CORES)
-    # For single XLA device or CPU/GPU, call main_training_logic directly.
-    if _IS_XLA_AVAILABLE : # and xm.xrt_world_size() > 1: # If you want to use xmp.spawn for multi-core
-        # logger.info(f"Spawning {xm.xrt_world_size()} XLA processes for training.")
-        # flags = {} # Pass any command-line flags or static config here
-        # xmp.spawn(_mp_fn, args=(flags, main_training_logic, BASE_MODEL_NAME, STAGE2_OUTPUT_POOL), nprocs=xm.xrt_world_size(), start_method='fork')
-        # For single XLA device, direct call is simpler to start with:
-        logger.info("Running on a single XLA device (or master process if multi-core not explicitly spawned via xmp).")
-        main_training_logic(BASE_MODEL_NAME, STAGE2_OUTPUT_POOL)
-
-    else: # CPU or GPU
-        main_training_logic(BASE_MODEL_NAME, STAGE2_OUTPUT_POOL)
-    
-    print("--- PRINT: Stage 3 main_training_logic() finished or errored out. ---")
-    if _IS_XLA_AVAILABLE and xm.get_ordinal() == 0 : # Ensure master process also calls shutdown.
-        logging.shutdown()
-    elif not _IS_XLA_AVAILABLE:
-        logging.shutdown() 
+    main()
 
