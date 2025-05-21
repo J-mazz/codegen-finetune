@@ -1,4 +1,5 @@
 transformers
 datasets
 pandas
-accelerate
+torch
+torch_xla
