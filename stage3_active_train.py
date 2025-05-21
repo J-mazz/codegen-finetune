@@ -1,4 +1,4 @@
-# stage3_active_train.py (Advanced Phased & Validated Active Learning Cycle - GPU/CPU Adapted)
+# stage3_active_train.py (Advanced Phased & Validated Active Learning Cycle - Memory Optimization)
 
 import os
 import json
@@ -15,7 +15,7 @@ import sys
 # --- Configuration ---
 STAGE2_OUTPUT_POOL = "./active_learn_pool.jsonl"
 BASE_MODEL_NAME = "Salesforce/codegen-350M-mono"
-OUTPUT_DIR_BASE = "./active_learning_cycle_0_gpu_cpu" # Changed output dir name
+OUTPUT_DIR_BASE = "./active_learning_cycle_0_gpu_cpu" 
 LOG_FILE = os.path.join(OUTPUT_DIR_BASE, "s3_active_train_cycle_0_gpu_cpu.log")
 
 # --- Ensure Output Directories Exist ---
@@ -101,7 +101,7 @@ TRAINING_PHASES = [
 
 # General Training Hyperparameters
 MAX_SEQ_LENGTH = 512
-BATCH_SIZE = 2 # Adjust based on GPU memory
+BATCH_SIZE = 1 # <<< REDUCED BATCH SIZE FOR MEMORY
 VALIDATION_SPLIT_RATIO = 0.15
 EARLY_STOPPING_PATIENCE = 3
 
@@ -287,7 +287,7 @@ def select_data_for_phase(data_pool, num_main_samples, language_filter,
 
 
 # --- Create DataLoaders ---
-def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ratio): # Removed current_device, using global `device`
+def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ratio): 
     logger.debug(f"create_dataloaders called with {len(records)} records.")
     if not records:
         logger.warning("Cannot create dataloaders from empty record list.")
@@ -325,10 +325,7 @@ def create_dataloaders(records, tokenizer, max_seq_len, batch_size, val_split_ra
     else:
         logger.info("Validation split ratio is 0 or dataset too small for split, using all data for training.")
 
-    # GPU/CPU DataLoader settings
-    # num_workers > 0 can speed up data loading if it's a bottleneck.
-    # pin_memory=True is for CUDA to speed up host-to-device transfers.
-    num_dataloader_workers = 2 if device.type == 'cuda' else 0 # Example: use workers for GPU
+    num_dataloader_workers = 2 if device.type == 'cuda' else 0 
     pin_memory_setting = True if device.type == 'cuda' else False
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
@@ -386,9 +383,8 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
         optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_total_training_steps
     )
     
-    # For GPU mixed precision (NVIDIA GPUs with Tensor Cores like T4, V100, A100)
     scaler = None
-    use_amp = False # Automatic Mixed Precision
+    use_amp = False 
     if device.type == 'cuda' and hasattr(torch.cuda.amp, 'GradScaler'):
         scaler = torch.cuda.amp.GradScaler()
         use_amp = True
@@ -445,7 +441,7 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
 
         for batch_idx, batch in enumerate(train_progress_bar):
             try:
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True) # set_to_none=True can be slightly more efficient
                 input_ids = batch["input_ids"].to(device) 
                 attention_mask = batch["attention_mask"].to(device) 
                 labels = input_ids.clone()
@@ -460,7 +456,7 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                         scaler.scale(loss).backward()
                         scaler.step(optimizer)
                         scaler.update()
-                else: # Not using AMP
+                else: 
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs.loss
                     if loss is not None:
@@ -474,6 +470,16 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                     train_progress_bar.set_postfix({'loss': loss.item(), 'lr': scheduler.get_last_lr()[0]})
                 else:
                     logger.warning(f"  Training (Batch {batch_idx}): Loss is None. Skipping backprop.")
+            except RuntimeError as e_runtime: # Catch specific runtime errors like OOM
+                if "out of memory" in str(e_runtime).lower():
+                    logger.error(f"CUDA out of memory during training batch {batch_idx} in phase '{phase_name}', epoch {epoch+1}. Attempting to clear cache.", exc_info=False) # Less verbose OOM
+                    if device.type == 'cuda': torch.cuda.empty_cache()
+                    # Optionally, try to skip this batch or reduce batch size dynamically (more complex)
+                    # For now, we just log and continue, which might lead to inaccurate epoch loss if many batches fail.
+                    # Consider raising the error to stop if OOM is persistent.
+                else:
+                    logger.error(f"  Runtime error during training batch {batch_idx} in phase '{phase_name}', epoch {epoch+1}: {e_runtime}", exc_info=True)
+                continue # Continue to next batch
             except Exception as e_batch:
                 logger.error(f"  Error during training batch {batch_idx} in phase '{phase_name}', epoch {epoch+1}: {e_batch}", exc_info=True)
                 continue 
@@ -519,9 +525,9 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                         else:
                             logger.warning(f"  Validation (Batch {batch_idx_val}): Loss is None.")
                         
-                        active_loss_mask = attention_mask.view(-1) == 1 # Use original attention_mask for active tokens
+                        active_loss_mask = attention_mask.view(-1) == 1 
                         active_logits = logits.view(-1, model.config.vocab_size)[active_loss_mask]
-                        active_labels = labels.view(-1)[active_loss_mask] # Use original labels for accuracy
+                        active_labels = labels.view(-1)[active_loss_mask] 
 
                         if active_logits.size(0) > 0: 
                             preds = torch.argmax(active_logits, dim=1)
@@ -530,6 +536,13 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
                         
                         num_val_batches +=1
                         val_progress_bar.set_postfix({'val_loss': loss.item() if loss else float('nan')})
+                    except RuntimeError as e_runtime_val:
+                        if "out of memory" in str(e_runtime_val).lower():
+                            logger.error(f"CUDA out of memory during validation batch {batch_idx_val} in phase '{phase_name}', epoch {epoch+1}. Attempting to clear cache.", exc_info=False)
+                            if device.type == 'cuda': torch.cuda.empty_cache()
+                        else:
+                            logger.error(f"  Runtime error during validation batch {batch_idx_val} in phase '{phase_name}', epoch {epoch+1}: {e_runtime_val}", exc_info=True)
+                        continue
                     except Exception as e_val_batch:
                         logger.error(f"  Error during validation batch {batch_idx_val} in phase '{phase_name}', epoch {epoch+1}: {e_val_batch}", exc_info=True)
                         continue 
@@ -564,6 +577,11 @@ def fine_tune_phase(model, tokenizer, train_dataloader, val_dataloader, epochs, 
             except Exception as e_save:
                  logger.error(f"  Error saving model (no validation) during phase '{phase_name}': {e_save}", exc_info=True)
         
+        if device.type == 'cuda': # Clear cache at end of epoch if on GPU
+            torch.cuda.empty_cache()
+            logger.debug(f"Cleared CUDA cache at end of epoch {epoch+1} for phase '{phase_name}'.")
+
+
     logger.info(f"Fine-tuning phase '{phase_name}' complete. Best validation loss for phase: {best_val_loss:.4f}, Accuracy: {best_val_accuracy:.4f}")
     
     if not best_model_path_this_phase and val_dataloader and epochs > 0 and num_train_batches > 0 : 
@@ -628,6 +646,7 @@ def main():
 
             except Exception as e:
                 logger.error(f"Failed to load model from {current_model_path_or_name}: {e}. Skipping phase.", exc_info=True)
+                if device.type == 'cuda': torch.cuda.empty_cache() # Try to free memory
                 continue
             
             selected_data, newly_selected_ids = select_data_for_phase(
@@ -640,6 +659,7 @@ def main():
             
             if not selected_data:
                 logger.warning(f"No data selected for phase '{phase_name}'. Skipping phase.")
+                if device.type == 'cuda': torch.cuda.empty_cache()
                 continue 
 
             all_used_sample_ids_in_cycle.update(newly_selected_ids)
@@ -650,6 +670,7 @@ def main():
 
             if not train_loader or len(train_loader) == 0 : 
                 logger.warning(f"Train loader for phase '{phase_name}' is empty. Skipping fine-tuning for this phase.")
+                if device.type == 'cuda': torch.cuda.empty_cache()
                 continue
 
             initial_freeze_config = phase_config.get("freeze_layers_config")
@@ -680,6 +701,15 @@ def main():
                 logger.info(f"Phase '{phase_name}' complete. Best model for this phase at: {current_model_path_or_name}")
             else:
                 logger.warning(f"Phase '{phase_name}' did not result in a saved best model. The model from '{current_model_path_or_name}' will be used for the next phase if applicable.")
+            
+            # Clear CUDA cache after a phase completes or fails to save a model
+            if device.type == 'cuda':
+                logger.info(f"Clearing CUDA cache after phase '{phase_name}'.")
+                del model # Explicitly delete model from previous phase from memory
+                if 'train_loader' in locals() and train_loader is not None: del train_loader
+                if 'val_loader' in locals() and val_loader is not None: del val_loader
+                torch.cuda.empty_cache()
+
 
         logger.info(f"✅ All training phases complete for this cycle. Final model considered is at: {current_model_path_or_name}")
 
